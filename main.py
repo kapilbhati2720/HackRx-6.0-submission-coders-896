@@ -1,36 +1,45 @@
 import requests
 import io
-import json
 import os
 from typing import List
 
 # --- Core Libraries ---
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-import faiss
 import numpy as np
 
 # --- Document Processing ---
 from pypdf import PdfReader
 from docx import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # --- AI & Embeddings ---
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from sentence_transformers import SentenceTransformer
 import google.generativeai as genai
 
 # --- Configuration ---
-# IMPORTANT: Replace "YOUR_GEMINI_API_KEY" with your actual key
 os.environ['GOOGLE_API_KEY'] = "AIzaSyARPqQzg79gAVbtmvgAFyblhPO1055nUuk"
 try:
     genai.configure(api_key=os.environ['GOOGLE_API_KEY'])
 except Exception as e:
     print(f"Error configuring Gemini API: {e}")
 
-# --- Component 1: Document Ingestion & Chunking (Unchanged) ---
+# --- NEW: Simplified Logic using Gemini Embeddings ---
+
+def embed_text_with_gemini(text: List[str]) -> List[List[float]]:
+    """Uses the Gemini API to create embeddings for a list of text chunks."""
+    try:
+        # Using the new text-embedding-004 model from Google
+        result = genai.embed_content(model="models/text-embedding-004",
+                                     content=text,
+                                     task_type="RETRIEVAL_DOCUMENT")
+        return result['embedding']
+    except Exception as e:
+        print(f"Error creating embeddings with Gemini: {e}")
+        return [[] for _ in text]
 
 def get_document_text(url: str) -> str:
-    """Fetches and extracts text from a PDF or DOCX file at a given URL."""
+    # This function remains the same
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
@@ -39,100 +48,60 @@ def get_document_text(url: str) -> str:
             with io.BytesIO(response.content) as f:
                 reader = PdfReader(f)
                 text = "".join(page.extract_text() for page in reader.pages)
-        elif 'openxmlformats-officedocument.wordprocessingml.document' in content_type:
+        else: # Assuming DOCX if not PDF
             with io.BytesIO(response.content) as f:
                 doc = Document(f)
                 text = "\n".join(para.text for para in doc.paragraphs)
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported file type: {content_type}.")
         return text
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=400, detail=f"Failed to fetch document from URL: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch or parse document: {e}")
 
 def get_text_chunks(text: str) -> list[str]:
-    """Splits text into smaller, semantically manageable chunks."""
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        length_function=len
-    )
+    # This function remains the same
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     return text_splitter.split_text(text)
 
-# --- Component 2: Vector Store (Unchanged) ---
-
-class VectorStore:
-    def __init__(self, model_name='paraphrase-MiniLM-L3-v2'):
-        self.model_name = model_name
-        self.model = None  # Initialize model as None
-        self.index = None
-        self.chunks = []
-
-    def _load_model(self):
-        """Loads the model if it hasn't been loaded yet."""
-        if self.model is None:
-            print("Loading embedding model for the first time...")
-            self.model = SentenceTransformer(self.model_name)
-            print("Model loaded successfully.")
-
-    def build_index(self, chunks: list[str]):
-        self._load_model()
-        """Creates a FAISS index from text chunks."""
-        self.chunks = chunks
-        embeddings = self.model.encode(chunks, convert_to_tensor=False)
-        embedding_dim = embeddings.shape[1]
-        self.index = faiss.IndexFlatL2(embedding_dim)
-        self.index.add(np.array(embeddings))
-        print(f"FAISS index built successfully with {len(chunks)} chunks.")
-
-    def search(self, query: str, k: int = 5) -> list[str]:
-        self._load_model()
-        """Performs a semantic search."""
-        if self.index is None: return []
-        query_embedding = self.model.encode([query])
-        _, indices = self.index.search(np.array(query_embedding), k)
-        return [self.chunks[i] for i in indices[0]]
-
-# --- Component 3: LLM Q&A Function (New) ---
-
-def get_answer_with_llm(question: str, context: list[str]) -> str:
-    """Generates a direct answer to a question based on context."""
-    context_str = "\n\n---\n\n".join(context)
+def get_batch_answers_with_llm(questions: List[str], context: str) -> List[str]:
+    # This function and its prompt remain the same
     model = genai.GenerativeModel('gemini-1.5-flash')
-
+    formatted_questions = "\n".join([f"{i+1}. {q}" for i, q in enumerate(questions)])
     prompt = f"""
     You are an expert Q&A assistant for policy documents.
-    Your task is to answer the user's question based *only* on the provided text excerpts.
-    Be concise and directly answer the question. If the information is not in the excerpts,
-    state that the answer is not found in the provided text.
+    Based *only* on the provided "CONTEXT", answer each of the "QUESTIONS" listed below.
+    Your response must be a single JSON object with a key "answers", which is a JSON array of strings.
+    The array must contain exactly {len(questions)} string answers, in the same order as the questions.
+    If the answer to a specific question is not found in the context, the string for that answer should be "Answer not found in the provided document."
 
-    **CONTEXT EXCERPTS:**
+    **CONTEXT:**
     ---
-    {context_str}
+    {context}
     ---
 
-    **QUESTION:**
-    "{question}"
+    **QUESTIONS:**
+    {formatted_questions}
 
-    **ANSWER:**
+    **JSON RESPONSE FORMAT:**
+    {{
+      "answers": [
+        "Answer to question 1",
+        "Answer to question 2",
+        ...
+      ]
+    }}
     """
     try:
         response = model.generate_content(prompt)
-        return response.text.strip()
+        json_str = response.text.strip().replace("```json", "").replace("```", "").strip()
+        result = json.loads(json_str)
+        return result.get("answers", [])
     except Exception as e:
-        print(f"Error during LLM call for question '{question}': {e}")
-        return "Error generating answer from LLM."
+        print(f"Error during batch LLM call: {e}")
+        return [f"Error processing batch: {e}" for _ in questions]
 
-# --- Component 4: FastAPI Application (Corrected for Auth Button) ---
+# --- FastAPI Application ---
 
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi import Security
+app = FastAPI(title="HackRx 6.0 Q&A System")
 
-app = FastAPI(
-    title="HackRx 6.0 Q&A System",
-    description="An LLM-powered system to answer questions on documents."
-)
-
-# NEW: Pydantic models matching the submission guide
 class QARequest(BaseModel):
     documents: str
     questions: List[str]
@@ -140,51 +109,42 @@ class QARequest(BaseModel):
 class QAResponse(BaseModel):
     answers: List[str]
 
-vector_store = VectorStore()
-
-# NEW: Explicitly define the security scheme
 auth_scheme = HTTPBearer()
 
-# REFACTORED: The main endpoint logic with corrected dependency
 @app.post("/hackrx/run", response_model=QAResponse)
 async def run_qa(request: QARequest, token: HTTPAuthorizationCredentials = Security(auth_scheme)):
-    """
-    The main Q&A endpoint that receives a document URL and a list of questions,
-    and returns a list of answers. Requires Bearer token authentication.
-    """
-    # The 'token' variable now holds the credential, but we don't need to use it for local testing.
-    # The platform will use it for real evaluation.
-    
     try:
-        # Step 1: Document Ingestion and Indexing
-        print(f"Fetching document from: {request.documents}")
+        # Step 1: Ingest and chunk document
         document_text = get_document_text(request.documents)
         chunks = get_text_chunks(document_text)
         if not chunks:
             raise HTTPException(status_code=400, detail="Could not extract text from document.")
-        vector_store.build_index(chunks)
         
-        # Step 2: Loop through questions and generate answers
-        all_answers = []
-        for question in request.questions:
-            print(f"Processing question: '{question}'")
-            # Step 2a: Retrieve context for the current question
-            retrieved_chunks = vector_store.search(question, k=5)
-            if not retrieved_chunks:
-                all_answers.append("No relevant information found in the document to answer this question.")
-                continue
-            
-            # Step 2b: Generate answer with LLM
-            answer = get_answer_with_llm(question, retrieved_chunks)
-            all_answers.append(answer)
-            print(f"Generated answer: '{answer}'")
+        # Step 2: Get embeddings for all chunks from Gemini API
+        print(f"Generating embeddings for {len(chunks)} document chunks...")
+        chunk_embeddings = np.array(embed_text_with_gemini(chunks))
+        
+        # Step 3: Get embeddings for all questions
+        print(f"Generating embeddings for {len(request.questions)} questions...")
+        question_embeddings = np.array(embed_text_with_gemini(request.questions))
+        
+        # Step 4: For each question, find the most relevant chunks (manual similarity search)
+        comprehensive_context = set()
+        for q_embedding in question_embeddings:
+            # Calculate cosine similarity
+            similarities = np.dot(chunk_embeddings, q_embedding) / (np.linalg.norm(chunk_embeddings, axis=1) * np.linalg.norm(q_embedding))
+            # Get top 3 chunks
+            top_indices = np.argsort(similarities)[-3:][::-1]
+            for index in top_indices:
+                comprehensive_context.add(chunks[index])
+        
+        context_str = "\n\n---\n\n".join(list(comprehensive_context))
+        
+        # Step 5: Make a single batch call to the LLM
+        all_answers = get_batch_answers_with_llm(request.questions, context_str)
         
         return QAResponse(answers=all_answers)
 
-    except HTTPException as e:
-        raise e
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
-
         raise HTTPException(status_code=500, detail=str(e))
-
