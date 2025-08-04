@@ -1,6 +1,7 @@
 import requests
 import io
 import os
+import json
 from typing import List
 
 # --- Core Libraries ---
@@ -148,3 +149,4 @@ async def run_qa(request: QARequest, token: HTTPAuthorizationCredentials = Secur
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
