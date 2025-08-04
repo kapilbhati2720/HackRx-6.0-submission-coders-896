@@ -61,7 +61,7 @@ def get_text_chunks(text: str) -> list[str]:
 # --- Component 2: Vector Store (Unchanged) ---
 
 class VectorStore:
-    def __init__(self, model_name='all-MiniLM-L6-v2'):
+    def __init__(self, model_name='paraphrase-MiniLM-L3-v2'):
         self.model_name = model_name
         self.model = None  # Initialize model as None
         self.index = None
@@ -187,3 +187,4 @@ async def run_qa(request: QARequest, token: HTTPAuthorizationCredentials = Secur
         print(f"An unexpected error occurred: {e}")
 
         raise HTTPException(status_code=500, detail=str(e))
+
