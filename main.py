@@ -62,11 +62,20 @@ def get_text_chunks(text: str) -> list[str]:
 
 class VectorStore:
     def __init__(self, model_name='all-MiniLM-L6-v2'):
-        self.model = SentenceTransformer(model_name)
+        self.model_name = model_name
+        self.model = None  # Initialize model as None
         self.index = None
         self.chunks = []
 
+    def _load_model(self):
+        """Loads the model if it hasn't been loaded yet."""
+        if self.model is None:
+            print("Loading embedding model for the first time...")
+            self.model = SentenceTransformer(self.model_name)
+            print("Model loaded successfully.")
+
     def build_index(self, chunks: list[str]):
+        self._load_model()
         """Creates a FAISS index from text chunks."""
         self.chunks = chunks
         embeddings = self.model.encode(chunks, convert_to_tensor=False)
@@ -76,6 +85,7 @@ class VectorStore:
         print(f"FAISS index built successfully with {len(chunks)} chunks.")
 
     def search(self, query: str, k: int = 5) -> list[str]:
+        self._load_model()
         """Performs a semantic search."""
         if self.index is None: return []
         query_embedding = self.model.encode([query])
@@ -175,4 +185,5 @@ async def run_qa(request: QARequest, token: HTTPAuthorizationCredentials = Secur
         raise e
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
+
         raise HTTPException(status_code=500, detail=str(e))
