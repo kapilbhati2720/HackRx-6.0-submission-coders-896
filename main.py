@@ -17,8 +17,8 @@ from pinecone import Pinecone
 
 # --- Configuration ---
 # These will be set in Render's Environment Variables
-os.environ['GOOGLE_API_KEY'] = "YOUR_GEMINI_API_KEY" # For the Q&A part
-PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
+os.environ['GOOGLE_API_KEY'] = "AIzaSyARPqQzg79gAVbtmvgAFyblhPO1055nUuk" # For the Q&A part
+PINECONE_API_KEY = os.environ.get("pcsk_4EqDAc_TNFrAcV3hQHfiB3rB79JGHcJ39QzkM8eujmRbAeUFPiNifqsBS7BQ3KHPShUnqY")
 
 # --- Initialize Pinecone ---
 try:
@@ -125,3 +125,4 @@ async def run_qa(request: QARequest, token: HTTPAuthorizationCredentials = Secur
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
