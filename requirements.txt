@@ -3,4 +3,4 @@ uvicorn
 requests
 pypdf
 python-docx
-pinecone-client
+pinecone
