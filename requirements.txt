@@ -4,6 +4,3 @@ requests
 pypdf
 python-docx
 pinecone
-google-generativeai
-numpy
-
