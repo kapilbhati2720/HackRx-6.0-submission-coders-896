@@ -1,6 +1,5 @@
 import os
 import io
-import json
 from typing import List
 
 # --- Core Libraries ---
@@ -8,45 +7,29 @@ from fastapi import FastAPI, HTTPException, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import requests
-import numpy as np
 
 # --- Document Processing ---
+from pydantic import Field
 from pypdf import PdfReader
 from docx import Document
-
-# --- AI & Embeddings ---
-import google.generativeai as genai
 
 # --- Pinecone Client ---
 from pinecone import Pinecone
 
 # --- Configuration ---
-os.environ['GOOGLE_API_KEY'] = "AIzaSyARPqQzg79gAVbtmvgAFyblhPO1055nUuk"
 PINECONE_API_KEY = os.environ.get("pcsk_4EqDAc_TNFrAcV3hQHfiB3rB79JGHcJ39QzkM8eujmRbAeUFPiNifqsBS7BQ3KHPShUnqY")
 PINECONE_INDEX_NAME = "hackrx-retrieval"
 
 try:
-    genai.configure(api_key=os.environ['GOOGLE_API_KEY'])
     pc = Pinecone(api_key=PINECONE_API_KEY)
     pinecone_index = pc.Index(PINECONE_INDEX_NAME)
-    print("Dependencies initialized successfully.")
+    print("Pinecone initialized successfully.")
 except Exception as e:
-    print(f"Error during initialization: {e}")
+    print(f"Error initializing Pinecone: {e}")
     pinecone_index = None
 
-# --- Re-introducing Gemini Embeddings ---
-def embed_text_with_gemini(text: List[str], task_type: str) -> List[List[float]]:
-    try:
-        result = genai.embed_content(model="models/text-embedding-004",
-                                     content=text,
-                                     task_type=task_type)
-        return result['embedding']
-    except Exception as e:
-        print(f"Error creating embeddings with Gemini: {e}")
-        return [[] for _ in text]
-
 # --- Text & Document Processing ---
-def split_text_into_chunks(text: str, chunk_size: int = 1000, chunk_overlap: int = 100) -> List[str]:
+def split_text_into_chunks(text: str, chunk_size: int = 400, chunk_overlap: int = 50) -> List[str]:
     if not text: return []
     chunks = []
     start = 0
@@ -65,52 +48,13 @@ def get_document_text(url: str) -> str:
             with io.BytesIO(response.content) as f:
                 reader = PdfReader(f)
                 text = "".join(page.extract_text() for page in reader.pages if page.extract_text())
-        else:
+        else: # Assuming DOCX
             with io.BytesIO(response.content) as f:
                 doc = Document(f)
                 text = "\n".join(para.text for para in doc.paragraphs)
         return text
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to fetch or parse document: {e}")
-
-# --- Q&A Function ---
-def get_batch_answers_with_llm(questions: List[str], context: str) -> List[str]:
-    # This function and its prompt remain the same
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    formatted_questions = "\n".join([f"{i+1}. {q}" for i, q in enumerate(questions)])
-    prompt = f"""
-    You are an expert Q&A assistant for policy documents.
-    Based *only* on the provided "CONTEXT", answer each of the "QUESTIONS" listed below.
-    Your response must be a single JSON object with a key "answers", which is a JSON array of strings.
-    The array must contain exactly {len(questions)} string answers, in the same order as the questions.
-    If the answer to a specific question is not found in the context, the string for that answer should be "Answer not found in the provided document."
-
-    CONTEXT:
-    ---
-    {context}
-    ---
-
-    QUESTIONS:
-    {formatted_questions}
-
-    JSON RESPONSE FORMAT:
-    {{
-      "answers": [
-        "Answer to question 1",
-        "Answer to question 2",
-        ...
-      ]
-    }}
-    """
-    try:
-        response = model.generate_content(prompt)
-        json_str = response.text.strip().replace("```json", "").replace("```", "").strip()
-        result = json.loads(json_str)
-        return result.get("answers", [])
-    except Exception as e:
-        print(f"Error during batch LLM call: {e}")
-        return [f"Error processing batch: {e}" for _ in questions]
-
 
 # --- FastAPI Application ---
 app = FastAPI(title="HackRx 6.0 Q&A System")
@@ -128,6 +72,7 @@ auth_scheme = HTTPBearer()
 async def run_qa(request: QARequest, token: HTTPAuthorizationCredentials = Security(auth_scheme)):
     if not pinecone_index:
         raise HTTPException(status_code=500, detail="Pinecone index is not available.")
+
     try:
         # Step 1: Ingest and chunk document
         document_text = get_document_text(request.documents)
@@ -135,44 +80,41 @@ async def run_qa(request: QARequest, token: HTTPAuthorizationCredentials = Secur
         if not chunks:
             raise HTTPException(status_code=400, detail="Could not extract text.")
 
-        # Step 2: Create embeddings for chunks using Gemini
-        print(f"Generating embeddings for {len(chunks)} chunks...")
-        chunk_embeddings = embed_text_with_gemini(text=chunks, task_type="RETRIEVAL_DOCUMENT")
-
-        # Step 3: Upsert embeddings AND metadata to Pinecone
-        print("Upserting to Pinecone...")
+        # Step 2: Upsert document chunks to Pinecone. Pinecone will create the embeddings.
+        print(f"Upserting {len(chunks)} chunks to Pinecone...")
         vectors_to_upsert = []
-        for i, (chunk, embedding) in enumerate(zip(chunks, chunk_embeddings)):
-            if embedding: # Ensure embedding was created successfully
-                vectors_to_upsert.append({
-                    "id": f"chunk_{i}",
-                    "values": embedding, # This is the required field we were missing
-                    "metadata": {"text": chunk}
-                })
-        if vectors_to_upsert:
-             pinecone_index.upsert(vectors=vectors_to_upsert, namespace=request.documents)
-
-        # Step 4: For each question, embed it and query Pinecone
-        comprehensive_context = set()
-        print(f"Generating embeddings for {len(request.questions)} questions...")
-        question_embeddings = embed_text_with_gemini(text=request.questions, task_type="RETRIEVAL_QUERY")
+        for i, chunk in enumerate(chunks):
+            vectors_to_upsert.append({
+                "id": f"chunk_{i}",
+                # The 'text' field is used by Pinecone's model to create the embedding
+                "metadata": {"text": chunk}
+            })
         
-        for q_embedding in question_embeddings:
-            if not q_embedding: continue
+        # Pinecone serverless upsert is slightly different, it uses a 'text' key inside the vector dict
+        pinecone_index.upsert(
+            vectors=[{"id": vec["id"], "metadata": vec["metadata"], "text": vec["metadata"]["text"]} for vec in vectors_to_upsert],
+            namespace=request.documents
+        )
+
+        # Step 3: For each question, query Pinecone to get the most relevant chunk
+        all_answers = []
+        for question in request.questions:
+            print(f"Querying for question: {question}")
+            # The text to be embedded and searched for is passed directly
             query_results = pinecone_index.query(
                 namespace=request.documents,
-                vector=q_embedding,
-                top_k=3,
-                include_metadata=True
+                top_k=1,
+                include_metadata=True,
+                text=question # This text is embedded by Pinecone
             )
-            for match in query_results['matches']:
-                comprehensive_context.add(match['metadata']['text'])
-        
-        context_str = "\n\n---\n\n".join(list(comprehensive_context))
+            
+            if query_results.get('matches') and query_results['matches']:
+                # The most relevant text chunk is our answer
+                answer = query_results['matches'][0]['metadata']['text']
+                all_answers.append(answer)
+            else:
+                all_answers.append("No relevant information found in the document.")
 
-        # Step 5: Get answers from LLM
-        all_answers = get_batch_answers_with_llm(request.questions, context_str)
-        
         return QAResponse(answers=all_answers)
 
     except Exception as e:
