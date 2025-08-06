@@ -22,8 +22,8 @@ from pinecone import Pinecone
 
 # --- Configuration ---
 # These keys MUST be set in Render's Environment Variables
-GOOGLE_API_KEY = os.environ.get("AIzaSyARPqQzg79gAVbtmvgAFyblhPO1055nUuk")
-PINECONE_API_KEY = os.environ.get("pcsk_4EqDAc_TNFrAcV3hQHfiB3rB79JGHcJ39QzkM8eujmRbAeUFPiNifqsBS7BQ3KHPShUnqY")
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
 PINECONE_INDEX_NAME = "hackrx-retrieval"
 
 try:
@@ -178,3 +178,4 @@ async def run_qa(request: QARequest, token: HTTPAuthorizationCredentials = Secur
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
