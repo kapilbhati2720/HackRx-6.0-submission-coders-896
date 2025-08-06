@@ -153,7 +153,7 @@ async def run_qa(request: QARequest, token: HTTPAuthorizationCredentials = Secur
              pinecone_index.upsert(vectors=vectors_to_upsert, namespace=request.documents)
 
         comprehensive_context = set()
-        question_embeddings = embed_text_with_gemini(text=request.questions, task_type="RETRIEVAL_QUERY")
+        question_embeddings = embed_text_with_gemini(text=request.questions, task_type="RETRIEVAL_DOCUMENT")
         
         for q_embedding in question_embeddings:
             if not q_embedding: continue
@@ -173,3 +173,4 @@ async def run_qa(request: QARequest, token: HTTPAuthorizationCredentials = Secur
         return QAResponse(answers=all_answers)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
