@@ -6,3 +6,4 @@ python-docx
 pinecone
 google-generativeai
 numpy
+langchain-text-splitters
