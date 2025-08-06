@@ -26,7 +26,6 @@ PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
 PINECONE_INDEX_NAME = "hackrx-retrieval"
 
 # --- LAZY INITIALIZATION ---
-# We will initialize these inside the request to ensure a fast startup
 pc = None
 pinecone_index = None
 genai_configured = False
@@ -34,24 +33,19 @@ genai_configured = False
 def initialize_dependencies():
     """Initializes clients on the first request."""
     global pc, pinecone_index, genai_configured
+    # This function is now called only by the main endpoint, not the health check
     if not genai_configured:
         try:
-            print("Configuring Google Generative AI for the first time...")
             genai.configure(api_key=GOOGLE_API_KEY)
             genai_configured = True
-            print("Google Generative AI configured successfully.")
         except Exception as e:
-            print(f"CRITICAL ERROR: Failed to configure Google AI: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to configure Google AI: {e}")
     
     if pc is None:
         try:
-            print("Initializing Pinecone client for the first time...")
             pc = Pinecone(api_key=PINECONE_API_KEY)
             pinecone_index = pc.Index(PINECONE_INDEX_NAME)
-            print("Pinecone initialized successfully.")
         except Exception as e:
-            print(f"CRITICAL ERROR: Failed to initialize Pinecone: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to initialize Pinecone: {e}")
 
 # --- All other functions (embed_text, get_document_text, etc.) remain the same ---
@@ -60,7 +54,6 @@ def embed_text_with_gemini(text: List[str], task_type: str) -> List[List[float]]
         result = genai.embed_content(model="models/text-embedding-004", content=text, task_type=task_type)
         return result['embedding']
     except Exception as e:
-        print(f"Error creating embeddings with Gemini: {e}")
         return [[] for _ in text]
 
 def split_text_into_chunks(text: str, chunk_size: int = 1000, chunk_overlap: int = 100) -> List[str]:
@@ -113,7 +106,6 @@ def get_batch_answers_with_llm(questions: List[str], context: str) -> List[str]:
         result = json.loads(json_str)
         return result.get("answers", [])
     except Exception as e:
-        print(f"Error during batch LLM call: {e}")
         return [f"Error processing batch: {e}" for _ in questions]
 
 # --- FastAPI Application ---
@@ -128,24 +120,27 @@ class QAResponse(BaseModel):
 
 auth_scheme = HTTPBearer()
 
+# --- NEW HEALTH CHECK ENDPOINT ---
+@app.get("/healthz")
+def health_check():
+    """A simple endpoint that Render can ping to confirm the service is alive."""
+    return {"status": "ok"}
+
 @app.post("/hackrx/run", response_model=QAResponse)
 async def run_qa(request: QARequest, token: HTTPAuthorizationCredentials = Security(auth_scheme)):
-    # Initialize dependencies on the first request
+    # Initialize dependencies on the first request to the main endpoint
     initialize_dependencies()
 
     if not pinecone_index:
         raise HTTPException(status_code=500, detail="Pinecone index could not be initialized.")
     try:
-        # Step 1: Ingest and chunk document
         document_text = get_document_text(request.documents)
         chunks = split_text_into_chunks(document_text)
         if not chunks:
             raise HTTPException(status_code=400, detail="Could not extract text.")
 
-        # Step 2: Create embeddings for chunks using Gemini
         chunk_embeddings = embed_text_with_gemini(text=chunks, task_type="RETRIEVAL_DOCUMENT")
 
-        # Step 3: Upsert embeddings AND metadata to Pinecone
         vectors_to_upsert = []
         for i, (chunk, embedding) in enumerate(zip(chunks, chunk_embeddings)):
             if embedding:
@@ -157,7 +152,6 @@ async def run_qa(request: QARequest, token: HTTPAuthorizationCredentials = Secur
         if vectors_to_upsert:
              pinecone_index.upsert(vectors=vectors_to_upsert, namespace=request.documents)
 
-        # Step 4: For each question, embed it and query Pinecone
         comprehensive_context = set()
         question_embeddings = embed_text_with_gemini(text=request.questions, task_type="RETRIEVAL_QUERY")
         
@@ -174,11 +168,8 @@ async def run_qa(request: QARequest, token: HTTPAuthorizationCredentials = Secur
         
         context_str = "\n".join(list(comprehensive_context))
 
-        # Step 5: Get answers from LLM
         all_answers = get_batch_answers_with_llm(request.questions, context_str)
         
         return QAResponse(answers=all_answers)
-
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
         raise HTTPException(status_code=500, detail=str(e))
